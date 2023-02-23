@@ -1,150 +1,342 @@
-This is in progress. I am working on it.
--------------------------------------------
+%% Property preallocation
+% Database construction set distribution
+trainingPrecentage = 0.6;
+validationPrecentage = 0.1;
 
-doTraining = false;
-if ~doTraining && ~exist('yolov2ResNet50VehicleExample_19b.mat','file')    
-    disp('Downloading pretrained detector (98 MB)...');
-    pretrainedURL = 'https://www.mathworks.com/supportfiles/vision/data/yolov2ResNet50VehicleExample_19b.mat';
-    websave('yolov2ResNet50VehicleExample_19b.mat',pretrainedURL);
-end
+% Properties for the model's layer graph
+inputSize = [224 224 3];
+featureExtractionNetwork = resnet18;
+featureLayer = 'res5b_relu';
 
-data = load('vehicleDatasetGroundTruth.mat');
-vehicleDataset = data.vehicleDataset;
+% Number of anchors to be detected
+numAnchors = 16;
 
-vehicleDataset(1:4,:)
-vehicleDataset.imageFilename = fullfile(pwd,vehicleDataset.imageFilename);
+% Negative and positive overlap range for detection
+NegativeOverlapRange = [0.1 0.5];
+PositiveOverlapRange = [0.6 1];
+% Allocation of variables that will be used later, so that the size of arrays will not change in every iteration
+epochNumVector = [5,10,15,20,25,30];
+modelData = cell(1,6);
+detectorVector = cell(1,6);
+mapTest = [0 0 0 0 0 0];
+mapTrain = [0 0 0 0 0 0];
 
-% create
-rng(0);
-shuffledIndices = randperm(height(vehicleDataset));
-idx = floor(0.6 * length(shuffledIndices) );
+%% Load DataTable
+% The DataTable was pre-saved.
+DataTable = load('N:\rariel\DataTableUpdated.mat');
+DataTable = DataTable.DataTable;
 
+%% Create datastores
+% Shuffle DataTable
+rng(0)
+shuffledIndices = randperm(height(DataTable));
+idx = floor(trainingPrecentage * height(DataTable));
+
+% Splitting the DataTable into three parts: training, validation 
+% and test, according to precentages set earlier.
 trainingIdx = 1:idx;
-trainingDataTbl = vehicleDataset(shuffledIndices(trainingIdx),:);
+trainingDataTbl = DataTable(shuffledIndices(trainingIdx),:);
 
-validationIdx = idx+1 : idx + 1 + floor(0.1 * length(shuffledIndices) );
-validationDataTbl = vehicleDataset(shuffledIndices(validationIdx),:);
+validationIdx = idx+1 : idx + 1 + floor(validationPrecentage * length(shuffledIndices) );
+validationDataTbl = DataTable(shuffledIndices(validationIdx),:);
 
 testIdx = validationIdx(end)+1 : length(shuffledIndices);
-testDataTbl = vehicleDataset(shuffledIndices(testIdx),:);
+testDataTbl = DataTable(shuffledIndices(testIdx),:);
+
+% Splitting each DataTable into image datastore and bounding box datastore.
 imdsTrain = imageDatastore(trainingDataTbl{:,'imageFilename'});
-bldsTrain = boxLabelDatastore(trainingDataTbl(:,'vehicle'));
+bldsTrain = boxLabelDatastore(trainingDataTbl(:,(2:end)));
 
 imdsValidation = imageDatastore(validationDataTbl{:,'imageFilename'});
-bldsValidation = boxLabelDatastore(validationDataTbl(:,'vehicle'));
+bldsValidation = boxLabelDatastore(validationDataTbl(:,(2:end)));
 
 imdsTest = imageDatastore(testDataTbl{:,'imageFilename'});
-bldsTest = boxLabelDatastore(testDataTbl(:,'vehicle'));
-Combine image and box label datastores.
+bldsTest = boxLabelDatastore(testDataTbl(:,(2:end)));
+
+% Combining each of the blds and imds into a combined datastore.
 trainingData = combine(imdsTrain,bldsTrain);
 validationData = combine(imdsValidation,bldsValidation);
 testData = combine(imdsTest,bldsTest);
-data = read(trainingData);
-I = data{1};
-bbox = data{2};
-annotatedImage = insertShape(I,'rectangle',bbox);
-annotatedImage = imresize(annotatedImage,2);
-figure
-imshow(annotatedImage)
 
-inputSize = [224 224 3];
-numClasses = width(vehicleDataset)-1;
-trainingDataForEstimation = transform(trainingData,@(data)preprocessData(data,inputSize));
-numAnchors = 7;
-[anchorBoxes, meanIoU] = estimateAnchorBoxes(trainingDataForEstimation, numAnchors)
-featureExtractionNetwork = resnet50;
-featureLayer = 'activation_40_relu';
-lgraph = yolov2Layers(inputSize,numClasses,anchorBoxes,featureExtractionNetwork,featureLayer);
+% Database validation. This can be done to make sure all images are where they are supposed to be, so no errors will occur later.
+validateInputData(trainingData);
+validateInputData(testData);
+
+%% Augment data
 augmentedTrainingData = transform(trainingData,@augmentData);
+
+% Visualize the augmented images.
 augmentedData = cell(4,1);
 for k = 1:4
+    % Reads image and bounding box
     data = read(augmentedTrainingData);
-    augmentedData{k} = insertShape(data{1},'rectangle',data{2});
+    % Inserts bounding box rectangle over image.
+    augmentedData{k} = insertShape(data{1,1}, 'Rectangle', data{1,2},'LineWidth',5);
     reset(augmentedTrainingData);
 end
+% Displays the image.
 figure
-montage(augmentedData,'BorderSize',10)
+montage(augmentedData, 'BorderSize', 10)
 
+%% Create variables for the creation of the model
+numClasses = width(DataTable)-1;
+classNames = trainingDataTbl.Properties.VariableNames(2:end);
+
+%% Preproccess data 
 preprocessedTrainingData = transform(augmentedTrainingData,@(data)preprocessData(data,inputSize));
 preprocessedValidationData = transform(validationData,@(data)preprocessData(data,inputSize));
-data = read(preprocessedTrainingData);
-I = data{1};
-bbox = data{2};
-annotatedImage = insertShape(I,'rectangle',bbox);
-annotatedImage = imresize(annotatedImage,2);
-figure
-imshow(annotatedImage)
 
-options = trainingOptions('sgdm', ...
-        'MiniBatchSize',16, ....
-        'InitialLearnRate',1e-3, ...
-        'MaxEpochs',20, ... 
-        'CheckpointPath',tempdir, ...
-        'ValidationData',preprocessedValidationData);
-[detector,info] = trainYOLOv2ObjectDetector(preprocessedTrainingData,lgraph,options);
-I = imread('highway.png');
+[anchorBoxes, meanIoU] = estimateAnchorBoxes(preprocessedTrainingData, numAnchors);
+
+%% Create layer Graph for the model
+lgraph = yolov2Layers(inputSize,numClasses,anchorBoxes,featureExtractionNetwork,featureLayer);
+
+%% Set training options for training the model
+% 'adam' is the optimizer used in the training proccess. 
+% 'Plots','training-progress' plots the training progress in a figure.
+% 'MiniBatchSize',4 is the size of batches that are read at the same time.
+% 'MaxEpochs',5 is the total number of repeats of the entire training data that will be done in each training session. Note: The training occurs 6 times, making a total of 30 epochs.
+% 'InitialLearnRate',1e-5 is the initial lear rate of the network.
+% 'LearnRateSchedule','piecewise' updates the learining rate every certain number of epochs.
+% 'ValidationData',validationData is the data that will be used during validation. This data will not be used for training.
+% 'ValidationFrequency',200 is the amount of itereations between each validation.
+% All other options were set to their default.
+options = trainingOptions('adam',...
+    'Plots','training-progress',...
+    'MiniBatchSize',4,...
+    'MaxEpochs',5,...
+    'InitialLearnRate',1e-5,...
+    'LearnRateSchedule','piecewise',...
+    'ValidationData',validationData,...
+    'ValidationFrequency',200);
+
+%% Train network
+% First iteration of training.
+[detector,info] = trainYOLOv2ObjectDetector(preprocessedTrainingData,...
+lgraph,options);
+% Save model into detectorVector
+detectorVector{1} = detector;
+% Repeat the training proccess 5 more times, building on previous iteration
+% each time.
+for numEpochInVector = 1:length(epochNumVector)-1
+    % Train model based on previous iteration.
+    [detector,info] = trainYOLOv2ObjectDetector(preprocessedTrainingData,...
+    detector,options);   
+    % Save model into detectorVector
+    detectorVector{numEpochInVector+1} = detector; 
+end
+
+%% Visualization of the model detection
+% Read an image from the test datatable
+I = imread(testDataTbl.imageFilename{1938});
 I = imresize(I,inputSize(1:2));
-[bboxes,scores] = detect(detector,I);
-I = insertObjectAnnotation(I,'rectangle',bboxes,scores);
+% detect animals using latest iteration of the model
+[bboxes,scores,labels] = detect(detector,I);
+labelWithScore = sprintf('%s %g',labels,num2str(scores));
+% Display image with detection
+I = insertObjectAnnotation(I,'rectangle',bboxes,labelWithScore);
 figure
 imshow(I)
 
-preprocessedTestData = transform(testData,@(data)preprocessData(data,inputSize));
-detectionResults = detect(detector, preprocessedTestData);
-[ap,recall,precision] = evaluateDetectionPrecision(detectionResults, preprocessedTestData);
+%% Full evaluation of all 6 models.
+% The evaluation is done for each model completely, with graphs, before continuing to the next model.
+for numEpochInVector = 1:length(detectorVector)
+    % Optional - Evaluate on training set
+    detector = detectorVector{numEpochInVector}; 
+    % Detect animals for all images in training set
+    detectionResults = detect(detector, trainingData.UnderlyingDatastores{1,1},'MinibatchSize',4);
+    % Evaluate all detections
+    [trainingAp, trainingRecall, trainingPrecision] = evaluateDetectionPrecision(detectionResults,trainingData);
+    
+    % Detect animals for all images in test set
+    detectionResults = detect(detector, testData.UnderlyingDatastores{1,1},'MinibatchSize',4);
+    % Evaluate on test set
+    [testAp, testRecall, testPrecision] = evaluateDetectionPrecision(detectionResults,testData);
+    
+    % save data
+    modelData{numEpochInVector} = {testAp, testRecall, testPrecision, trainingAp, trainingRecall, trainingPrecision};
 
-figure
-plot(recall,precision)
-xlabel('Recall')
-ylabel('Precision')
-grid on
-title(sprintf('Average Precision = %.2f',ap))
+%% Preparations for graphs
+    classes = detector.ClassNames;
+    
+    ap = [trainingAp testAp];
+    % Create mAPs for each dataset
+    mapTest(numEpochInVector) = mean(testAp);
+    mapTrain(numEpochInVector) = mean(trainingAp);
 
-Supporting Functions
-function B = augmentData(A)
-% Apply random horizontal flipping, and random X/Y scaling. Boxes that get
-% scaled outside the bounds are clipped if the overlap is above 0.25. Also,
-% jitter image color.
-
-B = cell(size(A));
-
-I = A{1};
-sz = size(I);
-if numel(sz)==3 && sz(3) == 3
-    I = jitterColorHSV(I,...
-        'Contrast',0.2,...
-        'Hue',0,...
-        'Saturation',0.1,...
-        'Brightness',0.2);
+    % Count number of appearances of each class in dataset
+    countedLabel = countEachLabel(bldsTrain);
+    countedLabel.ap = ap;    
+    
+%% Plot linear precision/recall graphs
+    figure("Name",append('Precision per class ',string(epochNumVector(numEpochInVector)),' epochs YOLO-v2'))
+    grid on
+    hold on
+    % Create a plot for each class
+    for i = 1:height(testRecall)
+        subplot(5,4,i)
+        plot(testRecall{i,1},testPrecision{i,1})
+        hold on
+        plot(trainingRecall{i,1},trainingPrecision{i,1})
+        title(sprintf('%s Average Precision = %.2f', string(classes(i)), string(ap(i))))
+        xlabel('Recall')
+        ylabel('Precision')
+        legend("Test Set","Training Set")
+        hold off
+    end
+    hold off
+    
+%% Plot bar graph using the AP of each class
+    figure("Name",append('Classes Average Precision ',string(epochNumVector(numEpochInVector)),' epochs YOLO-v2'))
+    % Plot bar graph
+    b = bar(categorical(classes), ap);
+    % Find edges of all bars.
+    xtips1 = b(1).XEndPoints;
+    ytips1 = b(1).YEndPoints;
+    xtips2 = b(2).XEndPoints;
+    ytips2 = b(2).YEndPoints;
+    % Find APs of all bars and represent them as precentages.
+    labels1 = string(round(b(1).YData, 3)*100);
+    labels2 = string(round(b(2).YData, 3)*100);
+    % Add labels to all bars
+    text(xtips1,ytips1,labels1,'HorizontalAlignment','center',...
+        'VerticalAlignment','bottom')
+    text(xtips2,ytips2,labels2,'HorizontalAlignment','center',...
+        'VerticalAlignment','bottom')
+    ylim([0 1])
+    title('Classes Average Precision')
+    legend("Training Set","Test Set")
+    
+%% Create Scatter graph for number of appearances in relation to precision
+    % Plot Scatter Graph
+    figure("Name",append('Number of Appearances over Average Precision ',string(epochNumVector(numEpochInVector)),' epochs YOLO-v2'))
+    scatter(countedLabel.Count,testAp)
+    % Add class names
+    text(countedLabel.Count, (ap(:,2))' + 0.01, countedLabel.Label ,'HorizontalAlignment','center',...
+        'VerticalAlignment','bottom','Rotation',-30)
+    xlabel('Number of samples in Test set')
+    ylabel('Average Precision')
+    title('Number of Appearances over Average Precision')
+    legend("Test Set")
 end
 
-% Randomly flip and scale image.
-tform = randomAffine2d('XReflection',true,'Scale',[1 1.1]);
-rout = affineOutputView(sz,tform,'BoundsStyle','CenterOutput');
-B{1} = imwarp(I,tform,'OutputView',rout);
+%% Create a plot to compare mAPs for every iteration
+% Plot linear graph
+figure("Name",'mAP of YOLO-v2 model')
+plot(epochNumVector,mapTest,epochNumVector,mapTrain);
+hold on
+title('mAP of YOLO-v2 model based on number of epochs')
+xlabel('Number of epochs')
+ylabel('mAP')
+legend("Test Set","Training Set")
+hold off
+
+%% Imported Functions
+function data = augmentData(data)
+% Randomly flip images and bounding boxes
+% horizontally.
+tform = randomAffine2d('XReflection',true);
+sz = size(data{1});
+rout = affineOutputView(sz,tform);
+data{1} = imwarp(data{1},tform,'OutputView',rout);
 
 % Sanitize box data, if needed.
-A{2} = helperSanitizeBoxes(A{2}, sz);
+data{2} = helperSanitizeBoxes(data{2}, sz);
 
-% Apply same transform to boxes.
-[B{2},indices] = bboxwarp(A{2},tform,rout,'OverlapThreshold',0.25);
-B{3} = A{3}(indices);
-
-% Return original data only when all boxes are removed by warping.
-if isempty(indices)
-    B = A;
-end
+% Warp boxes.
+data{2} = bboxwarp(data{2},tform,rout);
 end
 
 function data = preprocessData(data,targetSize)
-% Resize image and bounding boxes to the targetSize.
+% Resize image and bounding boxes to targetSize.
 sz = size(data{1},[1 2]);
 scale = targetSize(1:2)./sz;
 data{1} = imresize(data{1},targetSize(1:2));
 
 % Sanitize box data, if needed.
-data{2} = helperSanitizeBoxes(data{2},sz);
+data{2} = helperSanitizeBoxes(data{2}, sz);
 
-% Resize boxes to new image size.
+% Resize boxes.
 data{2} = bboxresize(data{2},scale);
+end
+
+function boxes = helperSanitizeBoxes(boxes, imageSize)
+persistent hasInvalidBoxes
+valid = all(boxes > 0, 2);
+if any(valid)
+    if ~all(valid) && isempty(hasInvalidBoxes)
+        % Issue one-time warning about removing invalid boxes.
+        hasInvalidBoxes = true;
+        warning('Removing ground truth bouding box data with values <= 0.')
+    end
+    boxes = boxes(valid,:);
+    boxes = roundFractionalBoxes(boxes, imageSize);
+end
+
+end
+
+function boxes = roundFractionalBoxes(boxes, imageSize)
+% If fractional data is present, issue one-time warning and round data and
+% clip to image size.
+persistent hasIssuedWarning
+
+allPixelCoordinates = isequal(floor(boxes), boxes);
+if ~allPixelCoordinates
+    
+    if isempty(hasIssuedWarning)
+        hasIssuedWarning = true;
+        warning('Rounding ground truth bounding box data to integer values.')
+    end
+    
+    boxes = round(boxes);
+    boxes(:,1:2) = max(boxes(:,1:2), 1); 
+    boxes(:,3:4) = min(boxes(:,3:4), imageSize([2 1]));
+end
+end
+
+function [gradients, state, info] = modelGradients(detector, XTrain, YTrain, penaltyThreshold)
+inputImageSize = size(XTrain,1:2);
+
+% Gather the ground truths in the CPU for post processing
+YTrain = gather(extractdata(YTrain));
+
+% Extract the predictions from the detector.
+[gatheredPredictions, YPredCell, state] = forward(detector, XTrain);
+
+% Generate target for predictions from the ground truth data.
+[boxTarget, objectnessTarget, classTarget, objectMaskTarget, boxErrorScale] = generateTargets(gatheredPredictions,...
+    YTrain, inputImageSize, detector.AnchorBoxes, penaltyThreshold);
+
+% Compute the loss.
+boxLoss = bboxOffsetLoss(YPredCell(:,[2 3 7 8]),boxTarget,objectMaskTarget,boxErrorScale);
+objLoss = objectnessLoss(YPredCell(:,1),objectnessTarget,objectMaskTarget);
+clsLoss = classConfidenceLoss(YPredCell(:,6),classTarget,objectMaskTarget);
+totalLoss = boxLoss + objLoss + clsLoss;
+
+info.boxLoss = boxLoss;
+info.objLoss = objLoss;
+info.clsLoss = clsLoss;
+info.totalLoss = totalLoss;
+
+% Compute gradients of learnables with regard to loss.
+gradients = dlgradient(totalLoss, detector.Learnables);
+end
+
+function boxLoss = bboxOffsetLoss(boxPredCell, boxDeltaTarget, boxMaskTarget, boxErrorScaleTarget)
+% Mean squared error for bounding box position.
+lossX = sum(cellfun(@(a,b,c,d) mse(a.*c.*d,b.*c.*d),boxPredCell(:,1),boxDeltaTarget(:,1),boxMaskTarget(:,1),boxErrorScaleTarget));
+lossY = sum(cellfun(@(a,b,c,d) mse(a.*c.*d,b.*c.*d),boxPredCell(:,2),boxDeltaTarget(:,2),boxMaskTarget(:,1),boxErrorScaleTarget));
+lossW = sum(cellfun(@(a,b,c,d) mse(a.*c.*d,b.*c.*d),boxPredCell(:,3),boxDeltaTarget(:,3),boxMaskTarget(:,1),boxErrorScaleTarget));
+lossH = sum(cellfun(@(a,b,c,d) mse(a.*c.*d,b.*c.*d),boxPredCell(:,4),boxDeltaTarget(:,4),boxMaskTarget(:,1),boxErrorScaleTarget));
+boxLoss = lossX+lossY+lossW+lossH;
+end
+
+function objLoss = objectnessLoss(objectnessPredCell, objectnessDeltaTarget, boxMaskTarget)
+% Binary cross-entropy loss for objectness score.
+objLoss = sum(cellfun(@(a,b,c) crossentropy(a.*c,b.*c,'TargetCategories','independent'),objectnessPredCell,objectnessDeltaTarget,boxMaskTarget(:,2)));
+end
+
+function clsLoss = classConfidenceLoss(classPredCell, classTarget, boxMaskTarget)
+% Binary cross-entropy loss for class confidence score.
+clsLoss = sum(cellfun(@(a,b,c) crossentropy(a.*c,b.*c,'TargetCategories','independent'),classPredCell,classTarget,boxMaskTarget(:,3)));
 end
