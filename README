@@ -1,3 +1,9 @@
-This is the Read-Me file for this project.
-The depository is now a barren land. The code is stuck, for now, in a Technion Limbo.
-
+Animal Detection using Convolutional Neural Networks
+------------------------------------------------------
+This project waas created for Alpha Technion by Ariel Ramrajker and Alon Feldman.
+This directory contains two things:
+1. The code used to make the YOLOv2 model for animal detection.
+2. A live-script version of that code.
+This code is written for MATLAB 2022b.
+The 'Imported Functions' used here are taken from https://www.mathworks.com/help/deeplearning/ug/object-detection-using-yolo-v2.html
+Thank you for reading!
