@@ -218,17 +218,6 @@ for numEpochInVector = 1:length(detectorVector)
     legend("Test Set")
 end
 
-%% Create a plot to compare mAPs for every iteration
-% Plot linear graph
-figure("Name",'mAP of YOLO-v2 model')
-plot(epochNumVector,mapTest,epochNumVector,mapTrain);
-hold on
-title('mAP of YOLO-v2 model based on number of epochs')
-xlabel('Number of epochs')
-ylabel('mAP')
-legend("Test Set","Training Set")
-hold off
-
 %% Imported Functions
 function data = augmentData(data)
 % Randomly flip images and bounding boxes
